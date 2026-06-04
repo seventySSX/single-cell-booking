@@ -40,13 +40,15 @@ export default function HomePage() {
   const [dayReservations, setDayReservations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [cancelingId, setCancelingId] = useState('');
   const [message, setMessage] = useState('');
   const [form, setForm] = useState({
     reserverName: '',
     contact: '',
     startHour: '9',
     endHour: '10',
-    purpose: ''
+    purpose: '',
+    cancelCode: ''
   });
 
   async function loadUpcoming() {
@@ -120,13 +122,49 @@ export default function HomePage() {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || '预约失败');
 
-      setMessage('预约成功！首页预约列表已更新。');
-      setForm((prev) => ({ ...prev, purpose: '' }));
+      setMessage('预约成功！请记住你设置的取消密码，之后取消预约时需要使用。');
+      setForm((prev) => ({ ...prev, purpose: '', cancelCode: '' }));
       await refresh(selectedDate);
     } catch (error) {
       setMessage(error.message);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleCancel(reservation) {
+    const cancelCode = window.prompt(
+      `请输入取消密码，确认取消 ${formatDateLabel(reservation.reservation_date)} ${formatHour(reservation.start_hour)}-${formatHour(reservation.end_hour)} 的预约。`
+    );
+
+    if (cancelCode === null) return;
+    if (!cancelCode.trim()) {
+      setMessage('请输入取消密码后再取消预约。');
+      return;
+    }
+
+    const confirmed = window.confirm('确认取消这条预约吗？取消后该时间段会重新开放。');
+    if (!confirmed) return;
+
+    setCancelingId(reservation.id);
+    setMessage('');
+
+    try {
+      const res = await fetch('/api/reservations', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: reservation.id, cancelCode })
+      });
+
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || '取消预约失败');
+
+      setMessage('预约已取消，时间段已重新开放。');
+      await refresh(selectedDate);
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setCancelingId('');
     }
   }
 
@@ -145,7 +183,7 @@ export default function HomePage() {
         </button>
       </section>
 
-      {message && <div className={message.includes('成功') ? 'notice success' : 'notice'}>{message}</div>}
+      {message && <div className={message.includes('成功') || message.includes('已取消') ? 'notice success' : 'notice'}>{message}</div>}
 
       <section className="grid-layout">
         <div className="card booking-card">
@@ -203,6 +241,19 @@ export default function HomePage() {
                 onChange={(event) => updateForm('contact', event.target.value)}
                 placeholder="例如：微信 / 手机 / 邮箱"
               />
+            </label>
+
+            <label>
+              取消密码
+              <input
+                type="password"
+                value={form.cancelCode}
+                onChange={(event) => updateForm('cancelCode', event.target.value)}
+                placeholder="至少 4 位；之后取消预约时使用"
+                minLength={4}
+                required
+              />
+              <small className="field-hint">系统不会在首页显示取消密码，请预约人自行记住。</small>
             </label>
 
             <label>
@@ -268,13 +319,21 @@ export default function HomePage() {
                 <div className="reservation-items">
                   {items.map((item) => (
                     <article className="reservation-item" key={item.id}>
-                      <div>
+                      <div className="reservation-main">
                         <strong>{formatHour(item.start_hour)} - {formatHour(item.end_hour)}</strong>
                         <p>{item.purpose || '未填写用途'}</p>
                       </div>
                       <div className="person">
                         <span>{item.reserver_name}</span>
                         {item.contact && <small>{item.contact}</small>}
+                        <button
+                          type="button"
+                          className="cancel-button"
+                          onClick={() => handleCancel(item)}
+                          disabled={cancelingId === item.id}
+                        >
+                          {cancelingId === item.id ? '取消中…' : '取消预约'}
+                        </button>
                       </div>
                     </article>
                   ))}
@@ -284,6 +343,13 @@ export default function HomePage() {
           </div>
         )}
       </section>
+
+      <footer className="site-footer">
+        <p>© 2026 兰州大学化学化工学院宫琛亮课题组. All Rights Reserved.</p>
+        <p>本平台仅限兰州大学化学化工学院宫琛亮课题组内部用于单电池仪器预约与信息同步。</p>
+        <p>页面内容、程序代码与预约数据未经授权不得复制、传播或用于商业用途。</p>
+        <p>技术维护：许博星｜知识产权与管理单位：兰州大学化学化工学院宫琛亮课题组</p>
+      </footer>
     </main>
   );
 }
