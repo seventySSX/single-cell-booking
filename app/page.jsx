@@ -56,7 +56,8 @@ function groupByDate(reservations) {
 }
 
 export default function HomePage() {
-  const [selectedDate, setSelectedDate] = useState(todayString());
+  const [selectedDate, setSelectedDate] = useState('');
+  const [isReady, setIsReady] = useState(false);
   const [reservations, setReservations] = useState([]);
   const [dayReservations, setDayReservations] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -68,7 +69,7 @@ export default function HomePage() {
     contact: '',
     startHour: '9',
     endHour: '10',
-    endDate: todayString(),
+    endDate: '',
     purpose: '',
     cancelCode: ''
   });
@@ -100,13 +101,18 @@ export default function HomePage() {
   }
 
   useEffect(() => {
-    refresh(selectedDate);
+    const today = todayString();
+    setSelectedDate(today);
+    setForm((prev) => ({ ...prev, endDate: today }));
+    setIsReady(true);
+    refresh(today);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
+    if (!isReady || !selectedDate) return;
     loadDay(selectedDate).catch((error) => setMessage(error.message));
-  }, [selectedDate]);
+  }, [selectedDate, isReady]);
 
   const groupedReservations = useMemo(() => groupByDate(reservations), [reservations]);
 
@@ -157,6 +163,10 @@ export default function HomePage() {
     setMessage('');
 
     try {
+      if (!selectedDate || !form.endDate) {
+        throw new Error('请选择开始日期和结束日期。');
+      }
+
       const res = await fetch('/api/reservations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -200,10 +210,22 @@ export default function HomePage() {
     setMessage('');
 
     try {
+      if (!selectedDate || !form.endDate) {
+        throw new Error('请选择开始日期和结束日期。');
+      }
+
       const res = await fetch('/api/reservations', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: reservation.id, cancelCode })
+        body: JSON.stringify({
+          id: reservation.id,
+          cancelCode,
+          reservationDate: reservation.reservation_date,
+          endDate: reservation.end_date || reservation.reservation_date,
+          startHour: reservation.start_hour,
+          endHour: reservation.end_hour,
+          reserverName: reservation.reserver_name
+        })
       });
 
       const json = await res.json();
@@ -239,7 +261,7 @@ export default function HomePage() {
         <div className="card booking-card">
           <div className="card-header">
             <h2>新建预约</h2>
-            <span>{formatDateLabel(selectedDate)}</span>
+            <span>{selectedDate ? formatDateLabel(selectedDate) : '正在读取日期…'}</span>
           </div>
 
           <form onSubmit={handleSubmit} className="booking-form">
@@ -260,7 +282,7 @@ export default function HomePage() {
                 <input
                   type="date"
                   value={form.endDate}
-                  min={selectedDate}
+                  min={selectedDate || undefined}
                   onChange={(event) => updateForm('endDate', event.target.value)}
                   required
                 />
@@ -334,7 +356,7 @@ export default function HomePage() {
             </label>
 
             <button className="submit-button" type="submit" disabled={submitting}>
-              {submitting ? '提交中…' : '提交预约'}
+              {submitting ? '提交中…' : isReady ? '提交预约' : '正在初始化…'}
             </button>
           </form>
         </div>

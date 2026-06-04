@@ -11,9 +11,9 @@ function isValidDateString(value) {
   return !Number.isNaN(date.getTime());
 }
 
-function isValidUuid(value) {
-  return typeof value === 'string'
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(value);
+function cleanIdentifier(value, maxLength = 120) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim().slice(0, maxLength);
 }
 
 function cleanText(value, maxLength = 200) {
@@ -176,6 +176,58 @@ export async function POST(request) {
   return Response.json({ reservation: data }, { status: 201 });
 }
 
+async function findReservationForCancel(body) {
+  const reservationId = cleanIdentifier(body.id);
+
+  // 优先按数据库主键查找。这里不再强制要求 UUID，因为部分 Supabase 表可能是手动创建的自增数字 id。
+  if (reservationId) {
+    const { data, error } = await supabaseAdmin
+      .from('reservations')
+      .select('id, cancel_code_hash, reserver_name, reservation_date, end_date, start_hour, end_hour')
+      .eq('id', reservationId)
+      .maybeSingle();
+
+    if (!error && data) return { reservation: data, error: null };
+
+    // 如果 id 类型与数据库不一致，继续用预约时间信息兜底查找，而不是直接报“编号错误”。
+    if (error && error.code !== '22P02') {
+      return { reservation: null, error };
+    }
+  }
+
+  const reservationDate = cleanText(body.reservationDate || body.reservation_date, 10);
+  const endDate = cleanText(body.endDate || body.end_date || reservationDate, 10);
+  const reserverName = cleanText(body.reserverName || body.reserver_name, 50);
+  const startHour = Number(body.startHour ?? body.start_hour);
+  const endHour = Number(body.endHour ?? body.end_hour);
+
+  if (!isValidDateString(reservationDate) || !isValidDateString(endDate)
+    || !Number.isInteger(startHour) || !Number.isInteger(endHour)) {
+    return {
+      reservation: null,
+      error: { message: '预约记录信息不完整，请刷新页面后再尝试取消。' }
+    };
+  }
+
+  let query = supabaseAdmin
+    .from('reservations')
+    .select('id, cancel_code_hash, reserver_name, reservation_date, end_date, start_hour, end_hour')
+    .eq('reservation_date', reservationDate)
+    .eq('end_date', endDate)
+    .eq('start_hour', startHour)
+    .eq('end_hour', endHour)
+    .limit(5);
+
+  if (reserverName) {
+    query = query.eq('reserver_name', reserverName);
+  }
+
+  const { data, error } = await query;
+  if (error) return { reservation: null, error };
+
+  return { reservation: data?.[0] || null, error: null };
+}
+
 export async function DELETE(request) {
   let body;
 
@@ -185,33 +237,32 @@ export async function DELETE(request) {
     return Response.json({ error: '提交内容格式错误。' }, { status: 400 });
   }
 
-  const reservationId = cleanText(body.id, 80);
   const cancelCode = cleanText(body.cancelCode, 60);
-
-  if (!isValidUuid(reservationId)) {
-    return Response.json({ error: '预约记录不存在或编号错误。' }, { status: 400 });
-  }
 
   if (!cancelCode) {
     return Response.json({ error: '请输入取消密码。' }, { status: 400 });
   }
 
-  const { data: reservation, error: readError } = await supabaseAdmin
-    .from('reservations')
-    .select('id, cancel_code_hash')
-    .eq('id', reservationId)
-    .maybeSingle();
+  const { reservation, error: readError } = await findReservationForCancel(body);
 
   if (readError) {
-    return Response.json({ error: '读取预约信息失败，请稍后再试。' }, { status: 500 });
+    return Response.json({ error: readError.message || '读取预约信息失败，请稍后再试。' }, { status: 500 });
   }
 
   if (!reservation) {
-    return Response.json({ error: '该预约不存在，可能已经被取消。' }, { status: 404 });
+    return Response.json({ error: '该预约不存在，可能已经被取消。请刷新页面后再确认。' }, { status: 404 });
   }
 
-  const codeMatched = reservation.cancel_code_hash === hashCancelCode(cancelCode);
   const adminMatched = isAdminCancelCode(cancelCode);
+  const codeMatched = reservation.cancel_code_hash
+    ? reservation.cancel_code_hash === hashCancelCode(cancelCode)
+    : false;
+
+  if (!reservation.cancel_code_hash && !adminMatched) {
+    return Response.json({
+      error: '这条预约没有保存取消密码，可能是旧版本系统创建的预约。请联系管理员使用管理员取消密码处理。'
+    }, { status: 403 });
+  }
 
   if (!codeMatched && !adminMatched) {
     return Response.json({ error: '取消密码不正确，无法取消该预约。' }, { status: 403 });
@@ -220,7 +271,7 @@ export async function DELETE(request) {
   const { error: deleteError } = await supabaseAdmin
     .from('reservations')
     .delete()
-    .eq('id', reservationId);
+    .eq('id', cleanIdentifier(reservation.id));
 
   if (deleteError) {
     return Response.json({ error: '取消预约失败，请稍后再试。' }, { status: 500 });
