@@ -396,3 +396,43 @@ textarea {
 .site-footer p {
   margin: 4px 0;
 }
+
+.form-note {
+  margin: -2px 0 2px;
+  padding: 10px 12px;
+  border: 1px dashed rgba(27, 95, 158, 0.26);
+  border-radius: 14px;
+  color: var(--muted);
+  background: rgba(238, 246, 255, 0.7);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.long-badge {
+  display: inline-block;
+  width: fit-content;
+  margin-top: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: var(--primary-dark);
+  background: rgba(27, 95, 158, 0.10);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.long-reservation {
+  border-color: rgba(27, 95, 158, 0.26);
+  background: rgba(238, 246, 255, 0.78);
+}
+
+.long-label {
+  display: inline-block;
+  margin: 0 0 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: var(--primary-dark);
+  background: rgba(27, 95, 158, 0.10);
+  font-size: 12px;
+  font-weight: 800;
+}

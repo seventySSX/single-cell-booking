@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
-const HOURS = Array.from({ length: 17 }, (_, i) => i + 7); // 7:00 - 23:00，可按需修改
+const HOURS = Array.from({ length: 18 }, (_, i) => i + 7); // 7:00 - 24:00，可按需修改
 
 function todayString() {
   const now = new Date();
@@ -26,6 +26,27 @@ function formatDateLabel(dateString) {
   });
 }
 
+function dateToDayNumber(dateString) {
+  const [year, month, day] = dateString.split('-').map(Number);
+  return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+}
+
+function toSlot(dateString, hour) {
+  return dateToDayNumber(dateString) * 24 + Number(hour);
+}
+
+function isMultiDay(reservation) {
+  return reservation.end_date && reservation.end_date !== reservation.reservation_date;
+}
+
+function formatReservationRange(reservation) {
+  const endDate = reservation.end_date || reservation.reservation_date;
+  if (reservation.reservation_date === endDate) {
+    return `${formatHour(reservation.start_hour)} - ${formatHour(reservation.end_hour)}`;
+  }
+  return `${formatDateLabel(reservation.reservation_date)} ${formatHour(reservation.start_hour)} - ${formatDateLabel(endDate)} ${formatHour(reservation.end_hour)}`;
+}
+
 function groupByDate(reservations) {
   return reservations.reduce((acc, item) => {
     if (!acc[item.reservation_date]) acc[item.reservation_date] = [];
@@ -47,6 +68,7 @@ export default function HomePage() {
     contact: '',
     startHour: '9',
     endHour: '10',
+    endDate: todayString(),
     purpose: '',
     cancelCode: ''
   });
@@ -88,18 +110,45 @@ export default function HomePage() {
 
   const groupedReservations = useMemo(() => groupByDate(reservations), [reservations]);
 
+  const endHourOptions = useMemo(() => {
+    const startHour = Number(form.startHour);
+    return HOURS.slice(1).filter((hour) => form.endDate !== selectedDate || hour > startHour);
+  }, [form.endDate, form.startHour, selectedDate]);
+
+  useEffect(() => {
+    if (endHourOptions.length === 0) return;
+    if (!endHourOptions.includes(Number(form.endHour))) {
+      setForm((prev) => ({ ...prev, endHour: String(endHourOptions[0]) }));
+    }
+  }, [endHourOptions, form.endHour]);
+
   const bookedMap = useMemo(() => {
     const map = new Map();
     for (const reservation of dayReservations) {
-      for (let hour = reservation.start_hour; hour < reservation.end_hour; hour++) {
-        map.set(hour, reservation);
+      const reservationStart = toSlot(reservation.reservation_date, reservation.start_hour);
+      const reservationEnd = toSlot(reservation.end_date || reservation.reservation_date, reservation.end_hour);
+
+      for (const hour of HOURS.slice(0, -1)) {
+        const slotStart = toSlot(selectedDate, hour);
+        const slotEnd = toSlot(selectedDate, hour + 1);
+        if (reservationStart < slotEnd && reservationEnd > slotStart && !map.has(hour)) {
+          map.set(hour, reservation);
+        }
       }
     }
     return map;
-  }, [dayReservations]);
+  }, [dayReservations, selectedDate]);
 
   function updateForm(key, value) {
     setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function handleStartDateChange(value) {
+    setSelectedDate(value);
+    setForm((prev) => ({
+      ...prev,
+      endDate: prev.endDate < value ? value : prev.endDate
+    }));
   }
 
   async function handleSubmit(event) {
@@ -114,6 +163,7 @@ export default function HomePage() {
         body: JSON.stringify({
           ...form,
           reservationDate: selectedDate,
+          endDate: form.endDate,
           startHour: Number(form.startHour),
           endHour: Number(form.endHour)
         })
@@ -123,7 +173,7 @@ export default function HomePage() {
       if (!res.ok) throw new Error(json.error || '预约失败');
 
       setMessage('预约成功！请记住你设置的取消密码，之后取消预约时需要使用。');
-      setForm((prev) => ({ ...prev, purpose: '', cancelCode: '' }));
+      setForm((prev) => ({ ...prev, endDate: selectedDate, purpose: '', cancelCode: '' }));
       await refresh(selectedDate);
     } catch (error) {
       setMessage(error.message);
@@ -134,7 +184,7 @@ export default function HomePage() {
 
   async function handleCancel(reservation) {
     const cancelCode = window.prompt(
-      `请输入取消密码，确认取消 ${formatDateLabel(reservation.reservation_date)} ${formatHour(reservation.start_hour)}-${formatHour(reservation.end_hour)} 的预约。`
+      `请输入取消密码，确认取消 ${formatReservationRange(reservation)} 的预约。`
     );
 
     if (cancelCode === null) return;
@@ -175,7 +225,7 @@ export default function HomePage() {
           <p className="eyebrow">Single Cell Station Booking</p>
           <h1>单电池仪器预约平台</h1>
           <p className="hero-text">
-            选择日期与小时段提交预约。已有预约会显示在首页和当天时间轴中，系统会自动阻止重复占用同一时间段。
+            选择日期与小时段提交预约。短时间测试只需选择同一天；长期稳定性测试可把结束日期改为后续日期，系统会自动阻止与已有预约重叠。
           </p>
         </div>
         <button className="refresh-button" onClick={() => refresh()} disabled={loading}>
@@ -193,16 +243,29 @@ export default function HomePage() {
           </div>
 
           <form onSubmit={handleSubmit} className="booking-form">
-            <label>
-              选择日期
-              <input
-                type="date"
-                value={selectedDate}
-                min={todayString()}
-                onChange={(event) => setSelectedDate(event.target.value)}
-                required
-              />
-            </label>
+            <div className="two-columns">
+              <label>
+                开始日期
+                <input
+                  type="date"
+                  value={selectedDate}
+                  min={todayString()}
+                  onChange={(event) => handleStartDateChange(event.target.value)}
+                  required
+                />
+              </label>
+
+              <label>
+                结束日期
+                <input
+                  type="date"
+                  value={form.endDate}
+                  min={selectedDate}
+                  onChange={(event) => updateForm('endDate', event.target.value)}
+                  required
+                />
+              </label>
+            </div>
 
             <div className="two-columns">
               <label>
@@ -217,12 +280,16 @@ export default function HomePage() {
               <label>
                 结束时间
                 <select value={form.endHour} onChange={(event) => updateForm('endHour', event.target.value)}>
-                  {HOURS.slice(1).map((hour) => (
+                  {endHourOptions.map((hour) => (
                     <option key={hour} value={hour}>{formatHour(hour)}</option>
                   ))}
                 </select>
               </label>
             </div>
+
+            <p className="form-note">
+              长期测试示例：开始日期选择 6 月 10 日 09:00，结束日期选择 6 月 13 日 09:00，即表示连续占用 3 天。
+            </p>
 
             <label>
               预约人
@@ -261,7 +328,7 @@ export default function HomePage() {
               <textarea
                 value={form.purpose}
                 onChange={(event) => updateForm('purpose', event.target.value)}
-                placeholder="例如：单电池极化曲线测试；样品编号 OPBI-PDA-1"
+                placeholder="例如：长期稳定性测试；样品编号 OPBI-PDA-1"
                 rows={3}
               />
             </label>
@@ -289,6 +356,7 @@ export default function HomePage() {
                       <>
                         <strong>{reservation.reserver_name}</strong>
                         <span>{reservation.purpose || '已预约'}</span>
+                        {isMultiDay(reservation) && <small className="long-badge">长期测试：{formatReservationRange(reservation)}</small>}
                       </>
                     ) : (
                       <span>可预约</span>
@@ -304,7 +372,7 @@ export default function HomePage() {
       <section className="card upcoming-card">
         <div className="card-header">
           <h2>首页预约总览</h2>
-          <span>未来 30 天</span>
+          <span>未来 60 天</span>
         </div>
 
         {loading ? (
@@ -318,9 +386,10 @@ export default function HomePage() {
                 <h3>{formatDateLabel(date)}</h3>
                 <div className="reservation-items">
                   {items.map((item) => (
-                    <article className="reservation-item" key={item.id}>
+                    <article className={isMultiDay(item) ? 'reservation-item long-reservation' : 'reservation-item'} key={item.id}>
                       <div className="reservation-main">
-                        <strong>{formatHour(item.start_hour)} - {formatHour(item.end_hour)}</strong>
+                        <strong>{formatReservationRange(item)}</strong>
+                        {isMultiDay(item) && <span className="long-label">长期稳定性测试</span>}
                         <p>{item.purpose || '未填写用途'}</p>
                       </div>
                       <div className="person">

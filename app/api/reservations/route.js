@@ -3,6 +3,8 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
 
+const OVERVIEW_DAYS = 60;
+
 function isValidDateString(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const date = new Date(`${value}T00:00:00`);
@@ -11,7 +13,7 @@ function isValidDateString(value) {
 
 function isValidUuid(value) {
   return typeof value === 'string'
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i.test(value);
 }
 
 function cleanText(value, maxLength = 200) {
@@ -28,8 +30,29 @@ function isAdminCancelCode(value) {
   return Boolean(adminCode) && value === adminCode;
 }
 
+function dateToDayNumber(dateString) {
+  const [year, month, day] = dateString.split('-').map(Number);
+  return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+}
+
+function toSlot(dateString, hour) {
+  return dateToDayNumber(dateString) * 24 + Number(hour);
+}
+
+function formatHour(hour) {
+  return `${String(hour).padStart(2, '0')}:00`;
+}
+
+function formatReservationRange(item) {
+  const endDate = item.end_date || item.reservation_date;
+  if (item.reservation_date === endDate) {
+    return `${item.reservation_date} ${formatHour(item.start_hour)}-${formatHour(item.end_hour)}`;
+  }
+  return `${item.reservation_date} ${formatHour(item.start_hour)} 至 ${endDate} ${formatHour(item.end_hour)}`;
+}
+
 function reservationSelectFields() {
-  return 'id, reserver_name, contact, reservation_date, start_hour, end_hour, purpose, created_at';
+  return 'id, reserver_name, contact, reservation_date, end_date, start_hour, end_hour, purpose, created_at';
 }
 
 export async function GET(request) {
@@ -43,14 +66,16 @@ export async function GET(request) {
     .order('start_hour', { ascending: true });
 
   if (selectedDate && isValidDateString(selectedDate)) {
-    query = query.eq('reservation_date', selectedDate);
+    // 读取与这一天有重叠的预约。这样跨多日的长期测试也会出现在每天的时间轴中。
+    query = query.lte('reservation_date', selectedDate).gte('end_date', selectedDate);
   } else {
     const today = new Date();
     const start = today.toISOString().slice(0, 10);
     const endDate = new Date(today);
-    endDate.setDate(today.getDate() + 30);
+    endDate.setDate(today.getDate() + OVERVIEW_DAYS);
     const end = endDate.toISOString().slice(0, 10);
-    query = query.gte('reservation_date', start).lte('reservation_date', end).limit(80);
+    // 读取未来一段时间内“仍然会占用仪器”的预约，包括已经开始但尚未结束的长期测试。
+    query = query.gte('end_date', start).lte('reservation_date', end).limit(120);
   }
 
   const { data, error } = await query;
@@ -75,7 +100,8 @@ export async function POST(request) {
   const contact = cleanText(body.contact, 80);
   const purpose = cleanText(body.purpose, 200);
   const cancelCode = cleanText(body.cancelCode, 60);
-  const reservationDate = cleanText(body.reservationDate, 10);
+  const reservationDate = cleanText(body.reservationDate || body.startDate, 10);
+  const endDate = cleanText(body.endDate || reservationDate, 10);
   const startHour = Number(body.startHour);
   const endHour = Number(body.endHour);
 
@@ -87,30 +113,41 @@ export async function POST(request) {
     return Response.json({ error: '请设置至少 4 位的取消密码。之后取消预约时需要使用。' }, { status: 400 });
   }
 
-  if (!isValidDateString(reservationDate)) {
-    return Response.json({ error: '请选择正确的日期。' }, { status: 400 });
+  if (!isValidDateString(reservationDate) || !isValidDateString(endDate)) {
+    return Response.json({ error: '请选择正确的开始日期和结束日期。' }, { status: 400 });
   }
 
-  if (!Number.isInteger(startHour) || !Number.isInteger(endHour) || startHour < 0 || startHour > 23 || endHour < 1 || endHour > 24 || endHour <= startHour) {
+  if (!Number.isInteger(startHour) || !Number.isInteger(endHour) || startHour < 0 || startHour > 23 || endHour < 1 || endHour > 24) {
     return Response.json({ error: '请选择正确的开始和结束时间。' }, { status: 400 });
   }
 
-  // 先做一次普通冲突检查，给用户更友好的提示。
-  const { data: conflicts, error: conflictError } = await supabaseAdmin
+  const newStartSlot = toSlot(reservationDate, startHour);
+  const newEndSlot = toSlot(endDate, endHour);
+
+  if (newEndSlot <= newStartSlot) {
+    return Response.json({ error: '结束时间必须晚于开始时间。长期测试时，请把结束日期改为后续日期。' }, { status: 400 });
+  }
+
+  // 先做一次普通冲突检查，给用户更友好的提示；数据库里还有最终防重叠约束兜底。
+  const { data: candidates, error: conflictError } = await supabaseAdmin
     .from('reservations')
-    .select('id, reserver_name, start_hour, end_hour')
-    .eq('reservation_date', reservationDate)
-    .lt('start_hour', endHour)
-    .gt('end_hour', startHour);
+    .select('id, reserver_name, reservation_date, end_date, start_hour, end_hour')
+    .lte('reservation_date', endDate)
+    .gte('end_date', reservationDate);
 
   if (conflictError) {
     return Response.json({ error: '检查预约冲突失败，请稍后再试。' }, { status: 500 });
   }
 
-  if (conflicts && conflicts.length > 0) {
-    const c = conflicts[0];
+  const conflict = (candidates || []).find((item) => {
+    const itemStart = toSlot(item.reservation_date, item.start_hour);
+    const itemEnd = toSlot(item.end_date || item.reservation_date, item.end_hour);
+    return itemStart < newEndSlot && itemEnd > newStartSlot;
+  });
+
+  if (conflict) {
     return Response.json({
-      error: `该时间段已被 ${c.reserver_name} 预约：${String(c.start_hour).padStart(2, '0')}:00-${String(c.end_hour).padStart(2, '0')}:00。`
+      error: `该时间段与 ${conflict.reserver_name} 的预约冲突：${formatReservationRange(conflict)}。`
     }, { status: 409 });
   }
 
@@ -120,6 +157,7 @@ export async function POST(request) {
       reserver_name: reserverName,
       contact,
       reservation_date: reservationDate,
+      end_date: endDate,
       start_hour: startHour,
       end_hour: endHour,
       purpose,
