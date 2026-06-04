@@ -247,7 +247,7 @@ export default function HomePage() {
           <p className="eyebrow">Single Cell Station Booking</p>
           <h1>单电池仪器预约平台</h1>
           <p className="hero-text">
-            选择日期与小时段提交预约。短时间测试只需选择同一天；长期稳定性测试可把结束日期改为后续日期，系统会自动阻止与已有预约重叠。
+            选择日期与小时段提交预约。短时间测试只需选择同一天；多日占用时可把结束日期改为后续日期，系统会自动阻止与已有预约重叠。
           </p>
         </div>
         <button className="refresh-button" onClick={() => refresh()} disabled={loading}>
@@ -310,7 +310,7 @@ export default function HomePage() {
             </div>
 
             <p className="form-note">
-              长期测试示例：开始日期选择 6 月 10 日 09:00，结束日期选择 6 月 13 日 09:00，即表示连续占用 3 天。
+              多日预约示例：开始日期选择 6 月 10 日 09:00，结束日期选择 6 月 13 日 09:00，即表示连续占用 3 天。
             </p>
 
             <label>
@@ -350,7 +350,7 @@ export default function HomePage() {
               <textarea
                 value={form.purpose}
                 onChange={(event) => updateForm('purpose', event.target.value)}
-                placeholder="例如：长期稳定性测试；样品编号 OPBI-PDA-1"
+                placeholder="例如：稳定性测试；样品编号 OPBI-PDA-1"
                 rows={3}
               />
             </label>
@@ -378,7 +378,7 @@ export default function HomePage() {
                       <>
                         <strong>{reservation.reserver_name}</strong>
                         <span>{reservation.purpose || '已预约'}</span>
-                        {isMultiDay(reservation) && <small className="long-badge">长期测试：{formatReservationRange(reservation)}</small>}
+                        {isMultiDay(reservation) && <small className="long-badge">多日预约：{formatReservationRange(reservation)}</small>}
                       </>
                     ) : (
                       <span>可预约</span>
@@ -411,7 +411,7 @@ export default function HomePage() {
                     <article className={isMultiDay(item) ? 'reservation-item long-reservation' : 'reservation-item'} key={item.id}>
                       <div className="reservation-main">
                         <strong>{formatReservationRange(item)}</strong>
-                        {isMultiDay(item) && <span className="long-label">长期稳定性测试</span>}
+                        {isMultiDay(item) && <span className="long-label">多日预约</span>}
                         <p>{item.purpose || '未填写用途'}</p>
                       </div>
                       <div className="person">
