@@ -4,9 +4,17 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 export const dynamic = 'force-dynamic';
 
 const OVERVIEW_DAYS = 60;
+const DEFAULT_HISTORY_DAYS = 90;
+const DEFAULT_RETENTION_DAYS = 365;
+
+function getRetentionDays() {
+  const value = Number.parseInt(process.env.HISTORY_RETENTION_DAYS || '', 10);
+  if (!Number.isInteger(value) || value < 30) return DEFAULT_RETENTION_DAYS;
+  return Math.min(value, 3650);
+}
 
 function isValidDateString(value) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return false;
   const date = new Date(`${value}T00:00:00`);
   return !Number.isNaN(date.getTime());
 }
@@ -28,6 +36,23 @@ function hashCancelCode(value) {
 function isAdminCancelCode(value) {
   const adminCode = process.env.ADMIN_CANCEL_CODE;
   return Boolean(adminCode) && value === adminCode;
+}
+
+function todayString() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function addDaysString(dateString, days) {
+  const date = new Date(`${dateString}T00:00:00`);
+  date.setDate(date.getDate() + days);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function dateToDayNumber(dateString) {
@@ -52,16 +77,113 @@ function formatReservationRange(item) {
 }
 
 function reservationSelectFields() {
-  return 'id, reserver_name, contact, reservation_date, end_date, start_hour, end_hour, purpose, created_at';
+  return [
+    'id',
+    'status',
+    'reserver_name',
+    'contact',
+    'reservation_date',
+    'end_date',
+    'start_hour',
+    'end_hour',
+    'purpose',
+    'created_at',
+    'canceled_at',
+    'feedback_instrument_ok',
+    'feedback_backpressure_released',
+    'feedback_hydrogen_shutdown',
+    'feedback_note',
+    'feedback_submitted_at',
+    'issue_resolved',
+    'issue_resolved_at'
+  ].join(', ');
+}
+
+function hasReportedIssue(item) {
+  if (!item.feedback_submitted_at) return false;
+  const note = cleanText(item.feedback_note, 800);
+  return item.feedback_instrument_ok === false
+    || item.feedback_backpressure_released === false
+    || item.feedback_hydrogen_shutdown === false
+    || Boolean(note);
+}
+
+async function cleanupOldReservations() {
+  const cutoff = addDaysString(todayString(), -getRetentionDays());
+  // 预约记录会保存在 Supabase，而不是 Vercel；这里做轻量自动清理，避免历史记录无限增长。
+  // 清理失败不影响正常预约功能。
+  await supabaseAdmin
+    .from('reservations')
+    .delete()
+    .lt('end_date', cutoff);
 }
 
 export async function GET(request) {
+  await cleanupOldReservations().catch(() => null);
+
   const { searchParams } = new URL(request.url);
   const selectedDate = searchParams.get('date');
+  const view = searchParams.get('view');
+
+  if (view === 'issues') {
+    const { data, error } = await supabaseAdmin
+      .from('reservations')
+      .select(reservationSelectFields())
+      .eq('issue_resolved', false)
+      .not('feedback_submitted_at', 'is', null)
+      .order('feedback_submitted_at', { ascending: false })
+      .limit(80);
+
+    if (error) {
+      return Response.json({ error: '读取异常反馈失败，请稍后再试。' }, { status: 500 });
+    }
+
+    return Response.json({ issues: (data || []).filter(hasReportedIssue) });
+  }
+
+  if (view === 'history') {
+    const today = todayString();
+    const from = isValidDateString(searchParams.get('from'))
+      ? searchParams.get('from')
+      : addDaysString(today, -DEFAULT_HISTORY_DAYS);
+    const to = isValidDateString(searchParams.get('to'))
+      ? searchParams.get('to')
+      : today;
+    const keyword = cleanText(searchParams.get('q') || '', 60).toLowerCase();
+
+    if (to < from) {
+      return Response.json({ error: '历史查询的结束日期不能早于开始日期。' }, { status: 400 });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('reservations')
+      .select(reservationSelectFields())
+      .lte('reservation_date', to)
+      .gte('end_date', from)
+      .order('reservation_date', { ascending: false })
+      .order('start_hour', { ascending: false })
+      .limit(500);
+
+    if (error) {
+      return Response.json({ error: '读取历史预约失败，请稍后再试。' }, { status: 500 });
+    }
+
+    const rows = keyword
+      ? (data || []).filter((item) => [
+          item.reserver_name,
+          item.contact,
+          item.purpose,
+          item.feedback_note
+        ].some((value) => String(value || '').toLowerCase().includes(keyword)))
+      : (data || []);
+
+    return Response.json({ history: rows, retentionDays: getRetentionDays() });
+  }
 
   let query = supabaseAdmin
     .from('reservations')
     .select(reservationSelectFields())
+    .eq('status', 'active')
     .order('reservation_date', { ascending: true })
     .order('start_hour', { ascending: true });
 
@@ -69,13 +191,10 @@ export async function GET(request) {
     // 读取与这一天有重叠的预约。这样跨多日的长期测试也会出现在每天的时间轴中。
     query = query.lte('reservation_date', selectedDate).gte('end_date', selectedDate);
   } else {
-    const today = new Date();
-    const start = today.toISOString().slice(0, 10);
-    const endDate = new Date(today);
-    endDate.setDate(today.getDate() + OVERVIEW_DAYS);
-    const end = endDate.toISOString().slice(0, 10);
-    // 读取未来一段时间内“仍然会占用仪器”的预约，包括已经开始但尚未结束的长期测试。
-    query = query.gte('end_date', start).lte('reservation_date', end).limit(120);
+    const start = todayString();
+    const end = addDaysString(start, OVERVIEW_DAYS);
+    // 读取未来一段时间内“仍然会占用仪器”的预约，包括已经开始但尚未结束的多日预约。
+    query = query.gte('end_date', start).lte('reservation_date', end).limit(160);
   }
 
   const { data, error } = await query;
@@ -88,6 +207,8 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
+  await cleanupOldReservations().catch(() => null);
+
   let body;
 
   try {
@@ -132,6 +253,7 @@ export async function POST(request) {
   const { data: candidates, error: conflictError } = await supabaseAdmin
     .from('reservations')
     .select('id, reserver_name, reservation_date, end_date, start_hour, end_hour')
+    .eq('status', 'active')
     .lte('reservation_date', endDate)
     .gte('end_date', reservationDate);
 
@@ -154,6 +276,7 @@ export async function POST(request) {
   const { data, error } = await supabaseAdmin
     .from('reservations')
     .insert({
+      status: 'active',
       reserver_name: reserverName,
       contact,
       reservation_date: reservationDate,
@@ -183,7 +306,7 @@ async function findReservationForCancel(body) {
   if (reservationId) {
     const { data, error } = await supabaseAdmin
       .from('reservations')
-      .select('id, cancel_code_hash, reserver_name, reservation_date, end_date, start_hour, end_hour')
+      .select('id, status, cancel_code_hash, reserver_name, reservation_date, end_date, start_hour, end_hour')
       .eq('id', reservationId)
       .maybeSingle();
 
@@ -211,7 +334,7 @@ async function findReservationForCancel(body) {
 
   let query = supabaseAdmin
     .from('reservations')
-    .select('id, cancel_code_hash, reserver_name, reservation_date, end_date, start_hour, end_hour')
+    .select('id, status, cancel_code_hash, reserver_name, reservation_date, end_date, start_hour, end_hour')
     .eq('reservation_date', reservationDate)
     .eq('end_date', endDate)
     .eq('start_hour', startHour)
@@ -229,6 +352,8 @@ async function findReservationForCancel(body) {
 }
 
 export async function DELETE(request) {
+  await cleanupOldReservations().catch(() => null);
+
   let body;
 
   try {
@@ -249,7 +374,7 @@ export async function DELETE(request) {
     return Response.json({ error: readError.message || '读取预约信息失败，请稍后再试。' }, { status: 500 });
   }
 
-  if (!reservation) {
+  if (!reservation || reservation.status === 'canceled') {
     return Response.json({ error: '该预约不存在，可能已经被取消。请刷新页面后再确认。' }, { status: 404 });
   }
 
@@ -268,14 +393,112 @@ export async function DELETE(request) {
     return Response.json({ error: '取消密码不正确，无法取消该预约。' }, { status: 403 });
   }
 
-  const { error: deleteError } = await supabaseAdmin
+  const { error: cancelError } = await supabaseAdmin
     .from('reservations')
-    .delete()
+    .update({ status: 'canceled', canceled_at: new Date().toISOString() })
     .eq('id', cleanIdentifier(reservation.id));
 
-  if (deleteError) {
+  if (cancelError) {
     return Response.json({ error: '取消预约失败，请稍后再试。' }, { status: 500 });
   }
 
   return Response.json({ ok: true });
+}
+
+export async function PATCH(request) {
+  await cleanupOldReservations().catch(() => null);
+
+  let body;
+
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: '提交内容格式错误。' }, { status: 400 });
+  }
+
+  const action = cleanText(body.action, 30);
+  const reservationId = cleanIdentifier(body.id);
+
+  if (!reservationId) {
+    return Response.json({ error: '缺少预约编号，请刷新页面后再试。' }, { status: 400 });
+  }
+
+  if (action === 'feedback') {
+    const instrumentOk = body.instrumentOk;
+    const backpressureReleased = body.backpressureReleased;
+    const hydrogenShutdown = body.hydrogenShutdown;
+    const feedbackNote = cleanText(body.feedbackNote, 800);
+
+    if (typeof instrumentOk !== 'boolean' || typeof backpressureReleased !== 'boolean' || typeof hydrogenShutdown !== 'boolean') {
+      return Response.json({ error: '请完整回答三个仪器状态问题。' }, { status: 400 });
+    }
+
+    const issueDetected = !instrumentOk || !backpressureReleased || !hydrogenShutdown || Boolean(feedbackNote);
+
+    const { data: reservation, error: readError } = await supabaseAdmin
+      .from('reservations')
+      .select('id, status')
+      .eq('id', reservationId)
+      .maybeSingle();
+
+    if (readError) {
+      return Response.json({ error: '读取预约失败，请稍后再试。' }, { status: 500 });
+    }
+
+    if (!reservation) {
+      return Response.json({ error: '预约记录不存在，请刷新页面后再试。' }, { status: 404 });
+    }
+
+    if (reservation.status === 'canceled') {
+      return Response.json({ error: '已取消的预约不能提交使用反馈。' }, { status: 400 });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('reservations')
+      .update({
+        feedback_instrument_ok: instrumentOk,
+        feedback_backpressure_released: backpressureReleased,
+        feedback_hydrogen_shutdown: hydrogenShutdown,
+        feedback_note: feedbackNote,
+        feedback_submitted_at: new Date().toISOString(),
+        issue_resolved: !issueDetected,
+        issue_resolved_at: null
+      })
+      .eq('id', reservationId)
+      .select(reservationSelectFields())
+      .single();
+
+    if (error) {
+      return Response.json({ error: '提交反馈失败，请稍后再试。' }, { status: 500 });
+    }
+
+    return Response.json({ reservation: data, issueDetected });
+  }
+
+  if (action === 'resolveIssue') {
+    const resolveCode = cleanText(body.resolveCode, 80);
+
+    if (!process.env.ADMIN_CANCEL_CODE) {
+      return Response.json({ error: '尚未设置管理员处理密码。请先在 Vercel 环境变量中设置 ADMIN_CANCEL_CODE。' }, { status: 500 });
+    }
+
+    if (!isAdminCancelCode(resolveCode)) {
+      return Response.json({ error: '管理员处理密码不正确，无法关闭异常提示。' }, { status: 403 });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('reservations')
+      .update({ issue_resolved: true, issue_resolved_at: new Date().toISOString() })
+      .eq('id', reservationId)
+      .select(reservationSelectFields())
+      .single();
+
+    if (error) {
+      return Response.json({ error: '关闭异常提示失败，请稍后再试。' }, { status: 500 });
+    }
+
+    return Response.json({ reservation: data });
+  }
+
+  return Response.json({ error: '未知操作。' }, { status: 400 });
 }
